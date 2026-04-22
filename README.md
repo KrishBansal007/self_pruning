@@ -1,55 +1,74 @@
-# Self-Pruning Neural Network (CIFAR-10)
+# Self-Pruning Neural Network for CIFAR-10
 
-## 🚀 Overview
+Train once. Learn accuracy and sparsity together.
 
-This project implements a **self-pruning neural network** that learns which connections to remove *during training* using learnable gates on each weight. The model balances **accuracy** and **sparsity** via a combined loss.
+This project implements a custom self-pruning network where every linear-layer weight has a learnable gate. The model is optimized end-to-end with a joint objective that balances classification performance and parameter sparsity.
 
----
+## Executive Summary
 
-## 🧠 Core Idea
+- Custom `PrunableLinear` layer built from scratch (no direct use of `nn.Linear` in prunable blocks)
+- Differentiable gating per weight: `w_eff = w * sigmoid(s / T)`
+- Joint objective: classification loss + sparsity regularization
+- Multi-`lambda` experiments show clear sparsity-accuracy trade-off
+- High compression behavior observed while preserving competitive CIFAR-10 accuracy
 
-Each weight has a learnable gate. The effective weight used in forward pass is:
+Representative run snapshot:
 
-**w_effective = w * sigmoid(s / T)**
+| Lambda | Test Accuracy | Sparsity |
+|--------|---------------|----------|
+| 0.0005 | 85.54%        | 96.78%   |
+| 0.0020 | 85.80%        | 99.13%   |
+| 0.0050 | ~84-85%       | ~99%+    |
+
+## Why This Is Interesting
+
+Traditional pruning is usually a post-training step. Here, pruning is learned during training itself. The model adapts its structure while learning features, which is closer to how efficient deployment pipelines should work in practice.
+
+## Method
+
+For each weight element $w_{ij}$, we learn a gate score $s_{ij}$ and compute gate value:
+
+$$
+g_{ij} = \sigma\left(\frac{s_{ij}}{T}\right), \quad g_{ij} \in (0,1)
+$$
+
+Effective weight in forward pass:
+
+$$
+w^{\text{eff}}_{ij} = w_{ij} \cdot g_{ij}
+$$
+
+Training objective:
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{CE}} + \lambda \cdot \mathcal{L}_{\text{sparsity}},
+\quad
+\mathcal{L}_{\text{sparsity}} = \sum |g_{ij}|
+$$
 
 Where:
-- `w` = original weight
-- `s` = learnable gate score
-- `sigmoid` squashes values to (0, 1)
-- `T` = temperature (controls sharpness of gating)
+- $T$ is a gate temperature (lower values sharpen gate decisions)
+- $\lambda$ controls the sparsity-accuracy trade-off
 
-This lets the network **learn which weights matter** during optimization.
+## Architecture and Training Design
 
----
+- Backbone: convolutional feature extractor for CIFAR-10
+- Classifier: stacked `PrunableLinear` layers with dropout + batch norm
+- Optimization:
+  - Separate parameter groups for base weights and gate scores
+  - Higher LR for gate scores to accelerate pruning dynamics
+  - Cosine LR scheduler
 
-## 🎯 Objective
+## Project Layout
 
-Train a CIFAR-10 classifier that:
-- Maintains strong accuracy
-- Prunes unnecessary weights
-- Demonstrates the **sparsity–accuracy trade-off** across different lambda values
-
----
-
-## ⚙️ Loss Function
-
-**L_total = L_classification + lambda * L_sparsity**
-
-**L_sparsity = sum(sigmoid(s / T))**
-
-- L1-style penalty on gates encourages many gates → 0
-- Higher `lambda` ⇒ stronger pruning pressure
-
----
-
-## 🏗️ Project Structure
-
-```
+```text
 self_pruning/
 ├── main.py
 ├── models/
+│   ├── __init__.py
 │   └── prunable_linear.py
 ├── utils/
+│   ├── __init__.py
 │   ├── loss.py
 │   └── metrics.py
 ├── outputs/
@@ -58,70 +77,9 @@ self_pruning/
 └── README.md
 ```
 
----
+## Reproducibility
 
-## 🔍 Implementation Highlights
-
-### 1) Custom Prunable Layer
-- Built from scratch (no `nn.Linear`)
-- Parameters: `weight`, `bias`, `gate_scores`
-- Forward pass:
-  - `gates = sigmoid(gate_scores)`
-  - `pruned_weights = weight * gates`
-
-### 2) Sparsity Mechanism
-- L1 penalty on gate activations
-- Drives many gates near zero → effective pruning
-
-### 3) Training Strategy
-- Joint optimization of weights and gate scores
-- (Optional) higher LR for gate parameters
-- Evaluate across multiple `lambda` values
-
-### 4) Evaluation Metrics
-- **Test Accuracy**
-- **Sparsity (%)** using a practical threshold (e.g., gate < 0.05)
-- **Gate Distribution** (histogram)
-
----
-
-## 📊 Results
-
-| Lambda | Accuracy | Sparsity |
-|--------|---------|----------|
-| 0.0005 | ~85.6%  | ~96.7%   |
-| 0.002  | ~85.9%  | ~99.1%   |
-| 0.005  | ~84–85% | ~99%+    |
-
----
-
-## 📈 Key Observations
-
-- The model **learns to prune itself during training**
-- Increasing `lambda` increases sparsity
-- Even with **>95% pruning**, accuracy remains high
-- Indicates strong **redundancy in dense networks**
-
----
-
-## 📉 Gate Distribution
-
-See `outputs/gate_distribution.png`:
-- Large spike near 0 → pruned weights
-- Cluster away from 0 → important connections
-
----
-
-## ⚡ Why This Works
-
-- L1 penalty promotes sparsity
-- Sigmoid gates make pruning differentiable
-- Joint optimization avoids post-processing
-- Temperature sharpens gate decisions
-
----
-
-## 🛠️ Setup & Run
+### 1) Setup
 
 ```bash
 python -m venv .venv
@@ -129,46 +87,50 @@ source .venv/bin/activate
 pip install torch torchvision matplotlib numpy
 ```
 
+### 2) Train and Evaluate
+
 ```bash
 python main.py
 ```
 
----
+### 3) Generated Artifacts
 
-## 📦 Outputs
+- `outputs/RESULTS.md`: markdown summary of run metrics
+- `outputs/gate_distribution.png`: histogram of learned gate values
 
-- `outputs/gate_distribution.png` (histogram)
-- `outputs/RESULTS.md` (summary)
+## Interpreting Results
 
----
+- Lower `lambda`: weaker pruning pressure, generally higher retained accuracy
+- Higher `lambda`: stronger pruning pressure, higher sparsity, possible accuracy drop
+- A strong solution is the best middle point on the Pareto trade-off
 
-## 🧠 Engineering Insights
+In the gate histogram, a successful run typically shows:
+- A strong mass near 0 (pruned connections)
+- A separate non-zero cluster (important retained connections)
 
-- Custom layer design + loss engineering
-- Clear sparsity–accuracy trade-off
-- End-to-end reproducible pipeline
+## Engineering Strengths Demonstrated
 
----
+- Custom PyTorch module design with correctly registered trainable parameters
+- Differentiable sparsity mechanism integrated into standard training loop
+- Controlled ablation over multiple regularization strengths
+- Practical reporting: quantitative table + qualitative gate distribution
 
-## 🚀 Possible Extensions
+## Next Improvements
 
-- Hard pruning (threshold gates and zero weights)
-- Structured pruning (neurons/channels)
-- Distillation on pruned model
+- Hard-threshold gates post training and benchmark true inference speedup
+- Structured pruning (channel / neuron) for hardware-friendly sparsity
+- Distill pruned model into a compact dense student
+- Add seed controls and multiple-run confidence intervals for stronger statistical reporting
 
----
+## Case Study Requirement Check
 
-## ✅ Case Study Coverage
+- Custom `PrunableLinear` implementation: done
+- Learnable gate scores with gradient flow: done
+- Combined classification + sparsity loss: done
+- CIFAR-10 training pipeline: done
+- Multi-`lambda` comparison: done
+- Final analysis + visualization artifacts: done
 
-- Custom `PrunableLinear` ✔
-- Learnable gates ✔
-- Combined loss ✔
-- CIFAR-10 training ✔
-- Multi-`lambda` comparison ✔
-- Quantitative + visual analysis ✔
+## Final Takeaway
 
----
-
-## 🏁 Takeaway
-
-**Neural networks can optimize both performance and structure simultaneously—removing redundant parameters while maintaining strong accuracy.**
+This implementation shows that model topology can be learned jointly with model weights. In other words, the network does not just learn what to predict, it learns how large it needs to be.
